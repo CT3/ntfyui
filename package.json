@@ -1,7 +1,7 @@
 {
   "name": "ntfyui",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Desktop client for ntfy with native notifications",
   "license": "MIT",
   "repository": "github:CT3/ntfyui",
