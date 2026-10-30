@@ -2,10 +2,14 @@
   "name": "ntfyui",
   "private": true,
   "version": "0.1.0",
+  "description": "Desktop client for ntfy with native notifications",
+  "license": "MIT",
+  "repository": "github:CT3/ntfyui",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "screenshots": "scripts/screenshots.sh"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"
