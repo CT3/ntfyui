@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ntfyui</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <nav class="sidebar">
+    <div class="brand">ntfyui</div>
+    <button class="tab active" data-tab="messages">Messages</button>
+    <button class="tab" data-tab="send">Send</button>
+    <button class="tab" data-tab="subscriptions">Subscriptions</button>
+    <button class="tab" data-tab="servers">Servers</button>
+    <button class="tab" data-tab="settings">Settings</button>
+  </nav>
+
+  <main>
+    <!-- Messages -->
+    <section id="messages" class="panel active">
+      <header>
+        <h1>Messages</h1>
+        <div class="actions">
+          <button id="test-notification" class="secondary">Test notification</button>
+          <button id="clear-messages" class="secondary">Clear</button>
+        </div>
+      </header>
+      <ul id="message-list" class="list"></ul>
+      <p id="messages-empty" class="empty">No messages yet. New messages on your subscribed topics will show up here and as system notifications.</p>
+    </section>
+
+    <!-- Send -->
+    <section id="send" class="panel">
+      <header><h1>Send message</h1></header>
+      <form id="send-form" class="card">
+        <div class="pair">
+          <label>Server <select id="send-server" required></select></label>
+          <label>Topic
+            <input id="send-topic" list="send-topics" pattern="[\-_A-Za-z0-9]{1,64}" title="Letters, numbers, - and _ (max 64)" required />
+            <datalist id="send-topics"></datalist>
+          </label>
+        </div>
+        <label>Title <input id="send-title" placeholder="Optional" /></label>
+        <label>Message <textarea id="send-message" rows="4" required></textarea></label>
+        <div class="pair">
+          <label>Priority
+            <select id="send-priority">
+              <option value="1">1 · min</option>
+              <option value="2">2 · low</option>
+              <option value="3" selected>3 · default</option>
+              <option value="4">4 · high</option>
+              <option value="5">5 · urgent</option>
+            </select>
+          </label>
+          <label>Tags <input id="send-tags" placeholder="warning, backup" /></label>
+        </div>
+        <label>Link (opened on click) <input id="send-click" type="url" placeholder="https://…" /></label>
+        <div class="actions">
+          <button type="submit" id="send-submit">Send</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Subscriptions -->
+    <section id="subscriptions" class="panel">
+      <header><h1>Subscriptions</h1></header>
+      <form id="sub-form" class="row">
+        <select id="sub-server" required></select>
+        <input id="sub-topic" placeholder="topic-name" pattern="[\-_A-Za-z0-9]{1,64}" title="Letters, numbers, - and _ (max 64)" required />
+        <button type="submit">Subscribe</button>
+      </form>
+      <ul id="sub-list" class="list"></ul>
+      <p id="subs-empty" class="empty">No subscriptions yet. Add a topic above.</p>
+    </section>
+
+    <!-- Servers -->
+    <section id="servers" class="panel">
+      <header><h1>Servers</h1></header>
+      <ul id="server-list" class="list"></ul>
+      <form id="server-form" class="card">
+        <h2 id="server-form-title">Add server</h2>
+        <input type="hidden" id="server-id" />
+        <label>Name <input id="server-name" placeholder="My server" required /></label>
+        <label>URL <input id="server-url" type="url" placeholder="https://ntfy.example.com" required /></label>
+        <label>Authentication
+          <select id="server-auth">
+            <option value="none">None</option>
+            <option value="basic">Username &amp; password</option>
+            <option value="token">Access token</option>
+          </select>
+        </label>
+        <div class="auth-basic">
+          <label>Username <input id="server-username" autocomplete="off" /></label>
+          <label>Password <input id="server-password" type="password" autocomplete="off" /></label>
+        </div>
+        <div class="auth-token">
+          <label>Token <input id="server-token" type="password" placeholder="tk_…" autocomplete="off" /></label>
+        </div>
+        <div class="actions">
+          <button type="submit">Save server</button>
+          <button type="button" id="server-cancel" class="secondary">Cancel</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Settings -->
+    <section id="settings" class="panel">
+      <header><h1>Settings</h1></header>
+      <ul class="list">
+        <li>
+          <div class="grow">
+            <div>System notifications</div>
+            <div class="meta" id="notif-permission">Checking…</div>
+          </div>
+          <button id="open-notif-settings" class="secondary small">Open System Settings</button>
+        </li>
+        <li>
+          <div class="grow">
+            <div>Launch at login</div>
+            <div class="meta">Start ntfyui in the menu bar when you log in, so you never miss a message.</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="autostart" /><span></span></label>
+        </li>
+      </ul>
+    </section>
+  </main>
+
+  <div id="toast"></div>
+  <script src="main.js"></script>
+</body>
+</html>
