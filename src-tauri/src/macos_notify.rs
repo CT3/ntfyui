@@ -72,8 +72,8 @@ impl Delegate {
 
 /// UNUserNotificationCenter throws if the process isn't a bundled app (e.g. `tauri dev`).
 pub fn is_supported() -> bool {
-    NSBundle::mainBundle().bundleIdentifier().is_some()
-        && NSBundle::mainBundle().bundlePath().to_string().ends_with(".app")
+    let bundle = NSBundle::mainBundle();
+    bundle.bundleIdentifier().is_some() && bundle.bundlePath().to_string().ends_with(".app")
 }
 
 pub fn init(app: &AppHandle) {
@@ -104,7 +104,8 @@ pub fn show(id: &str, title: &str, body: &str, url: Option<&str>) {
     content.setSound(Some(&UNNotificationSound::defaultSound()));
     if let Some(url) = url {
         let value = NSString::from_str(url);
-        let dict = NSDictionary::<NSString, NSString>::from_slices(&[ns_string!("url")], &[&*value]);
+        let dict =
+            NSDictionary::<NSString, NSString>::from_slices(&[ns_string!("url")], &[&*value]);
         let dict: Retained<NSDictionary> = unsafe { Retained::cast_unchecked(dict) };
         unsafe { content.setUserInfo(&dict) };
     }

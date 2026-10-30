@@ -3,6 +3,8 @@ use crate::AppState;
 use base64::Engine;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -60,7 +62,11 @@ pub struct Status {
 }
 
 fn set_status(app: &AppHandle, id: &str, state: &'static str, error: Option<String>) {
-    let status = Status { id: id.into(), state, error };
+    let status = Status {
+        id: id.into(),
+        state,
+        error,
+    };
     app.state::<AppState>()
         .statuses
         .lock()
@@ -73,7 +79,10 @@ pub fn auth_header(server: &Server) -> Option<String> {
     match server.auth_type.as_str() {
         "basic" if !server.username.is_empty() => {
             let raw = format!("{}:{}", server.username, server.password);
-            Some(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(raw)))
+            Some(format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(raw)
+            ))
         }
         "token" if !server.token.is_empty() => Some(format!("Bearer {}", server.token)),
         _ => None,
@@ -81,12 +90,12 @@ pub fn auth_header(server: &Server) -> Option<String> {
 }
 
 /// Keeps a subscription connected forever, reconnecting with backoff.
-pub async fn run(app: AppHandle, server: Server, sub: Subscription) {
+/// `since` is the last message already seen, so anything newer is caught up on.
+pub async fn run(app: AppHandle, server: Server, sub: Subscription, mut since: Option<String>) {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .build()
         .expect("http client");
-    let mut since: Option<String> = None;
     let mut backoff = 1;
     loop {
         set_status(&app, &sub.id, "connecting", None);
@@ -111,7 +120,7 @@ async fn stream_once(
 ) -> Result<(), String> {
     let mut url = format!("{}/{}/json", server.url.trim_end_matches('/'), sub.topic);
     if let Some(id) = since.as_ref() {
-        // Catch up on anything missed while disconnected.
+        // Catch up on anything missed while disconnected or while the app was closed.
         url.push_str(&format!("?since={id}"));
     }
     let mut req = client.get(&url);
@@ -135,7 +144,9 @@ async fn stream_once(
         buf.extend_from_slice(&chunk.map_err(|e| e.to_string())?);
         while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = buf.drain(..=pos).collect();
-            let Ok(mut msg) = serde_json::from_slice::<Message>(&line) else { continue };
+            let Ok(mut msg) = serde_json::from_slice::<Message>(&line) else {
+                continue;
+            };
             match msg.event.as_str() {
                 "open" => {
                     *backoff = 1;
@@ -153,13 +164,49 @@ async fn stream_once(
     }
 }
 
+/// Tags that are emoji shortcodes (e.g. "warning" -> ⚠️) are shown as emoji, like the
+/// official ntfy apps do. The map is shared with the UI.
+fn split_tags(tags: &[String]) -> (String, Vec<&str>) {
+    static EMOJI: OnceLock<HashMap<String, String>> = OnceLock::new();
+    let map = EMOJI.get_or_init(|| {
+        serde_json::from_str(include_str!("../../src/emoji.json")).expect("valid emoji.json")
+    });
+    let mut emojis = String::new();
+    let mut rest = Vec::new();
+    for tag in tags {
+        match map.get(tag) {
+            Some(e) => emojis.push_str(e),
+            None => rest.push(tag.as_str()),
+        }
+    }
+    (emojis, rest)
+}
+
 fn deliver(app: &AppHandle, msg: Message) {
+    let state = app.state::<AppState>();
+    let mut history = state.history.lock().unwrap();
+    // A catch-up after reconnecting can repeat messages we already have.
+    if history.contains(&msg.id) {
+        return;
+    }
+    if let Err(e) = history.push(msg.clone()) {
+        eprintln!("failed to save messages: {e}");
+    }
+    drop(history);
+    let _ = app.emit("message", &msg);
+
+    let (emojis, tags) = split_tags(msg.tags.as_deref().unwrap_or_default());
     let title = match &msg.title {
-        Some(t) if !t.is_empty() => t.clone(),
-        _ => msg.topic.clone(),
+        Some(t) if !t.is_empty() => t.as_str(),
+        _ => msg.topic.as_str(),
+    };
+    let title = if emojis.is_empty() {
+        title.to_string()
+    } else {
+        format!("{emojis} {title}")
     };
     let mut body = msg.message.clone().unwrap_or_default();
-    if let Some(tags) = msg.tags.as_ref().filter(|t| !t.is_empty()) {
+    if !tags.is_empty() {
         body = format!("{body}\n[{}]", tags.join(", "));
     }
     // Clicking the notification opens the message's click URL, or its first "view" action.
@@ -171,14 +218,51 @@ fn deliver(app: &AppHandle, msg: Message) {
             .and_then(|a| a.url.clone())
     });
     crate::notify(app, &msg.id, &title, &body, url.as_deref());
+}
 
-    let state = app.state::<AppState>();
-    let mut messages = state.messages.lock().unwrap();
-    messages.push_front(msg.clone());
-    messages.truncate(crate::MAX_MESSAGES);
-    if let Err(e) = crate::config::save_messages(app, &messages) {
-        eprintln!("failed to save messages: {e}");
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(auth_type: &str) -> Server {
+        Server {
+            id: "s".into(),
+            name: "s".into(),
+            url: "https://example.com".into(),
+            auth_type: auth_type.into(),
+            username: "user".into(),
+            password: "pass".into(),
+            token: "tk_abc".into(),
+        }
     }
-    drop(messages);
-    let _ = app.emit("message", msg);
+
+    #[test]
+    fn auth_header_by_type() {
+        assert_eq!(auth_header(&server("none")), None);
+        assert_eq!(
+            auth_header(&server("basic")).as_deref(),
+            Some("Basic dXNlcjpwYXNz")
+        );
+        assert_eq!(
+            auth_header(&server("token")).as_deref(),
+            Some("Bearer tk_abc")
+        );
+    }
+
+    #[test]
+    fn emoji_tags_are_split_from_plain_tags() {
+        let tags = vec!["warning".to_string(), "nas".into(), "fire".into()];
+        let (emojis, rest) = split_tags(&tags);
+        assert_eq!(emojis, "⚠️🔥");
+        assert_eq!(rest, vec!["nas"]);
+    }
+
+    #[test]
+    fn parses_ntfy_message_line() {
+        let line = r#"{"id":"abc","time":1,"event":"message","topic":"t","message":"hi","tags":["tada"],"click":"https://x.y"}"#;
+        let msg: Message = serde_json::from_str(line).unwrap();
+        assert_eq!(msg.message.as_deref(), Some("hi"));
+        assert_eq!(msg.click.as_deref(), Some("https://x.y"));
+        assert!(msg.actions.is_none());
+    }
 }

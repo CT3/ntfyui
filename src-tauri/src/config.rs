@@ -1,6 +1,4 @@
-use crate::ntfy::Message;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
@@ -75,31 +73,6 @@ impl Config {
 fn path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     Ok(dir.join("config.json"))
-}
-
-fn messages_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    Ok(dir.join("messages.json"))
-}
-
-pub fn load_messages(app: &AppHandle) -> VecDeque<Message> {
-    messages_path(app)
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-pub fn save_messages(app: &AppHandle, messages: &VecDeque<Message>) -> Result<(), String> {
-    let p = messages_path(app)?;
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let json = serde_json::to_string(messages).map_err(|e| e.to_string())?;
-    // Write to a temp file and rename so a crash mid-write can't corrupt the history.
-    let tmp = p.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
 }
 
 pub fn load(app: &AppHandle) -> Config {

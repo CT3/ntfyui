@@ -5,6 +5,7 @@ const $ = (sel) => document.querySelector(sel);
 
 let config = { servers: [], subscriptions: [] };
 let messages = [];
+let emoji = {}; // tag shortcode -> emoji, shared with the backend (emoji.json)
 const statuses = {};
 
 // ---------- helpers ----------
@@ -168,16 +169,25 @@ function messageLinks(m) {
   return links.length ? el("div", { class: "links" }, links) : null;
 }
 
+/** Emoji tags go in front of the title (like the official ntfy apps); the rest are listed. */
+function splitTags(tags = []) {
+  return {
+    emojis: tags.filter((t) => emoji[t]).map((t) => emoji[t]).join(""),
+    rest: tags.filter((t) => !emoji[t]),
+  };
+}
+
 function renderMessages() {
   $("#message-list").replaceChildren(
-    ...messages.map((m) =>
-      el(
+    ...messages.map((m) => {
+      const { emojis, rest } = splitTags(m.tags ?? []);
+      return el(
         "li",
         { class: `msg prio-${m.priority ?? 3}` },
         el(
           "div",
           { class: "top" },
-          el("span", { class: "title" }, m.title || m.topic),
+          el("span", { class: "title" }, [emojis, m.title || m.topic].filter(Boolean).join(" ")),
           el("span", { class: "meta" }, new Date(m.time * 1000).toLocaleString())
         ),
         el("div", { class: "body" }, linkify(m.message ?? "")),
@@ -186,10 +196,10 @@ function renderMessages() {
           "div",
           { class: "meta" },
           `${m.topic} · ${m.server_name}`,
-          m.tags?.length ? ` · ${m.tags.join(", ")}` : ""
+          rest.length ? ` · ${rest.join(", ")}` : ""
         )
-      )
-    )
+      );
+    })
   );
   $("#messages-empty").style.display = messages.length ? "none" : "";
 }
@@ -274,9 +284,13 @@ $("#test-notification").addEventListener("click", () =>
 );
 
 $("#clear-messages").addEventListener("click", async () => {
-  await invoke("clear_messages");
-  messages = [];
-  renderMessages();
+  try {
+    await invoke("clear_messages");
+    messages = [];
+    renderMessages();
+  } catch (e) {
+    toast(`Failed to clear: ${e}`);
+  }
 });
 
 // ---------- send ----------
@@ -355,6 +369,7 @@ listen("status", ({ payload }) => {
 (async () => {
   resetServerForm();
   config = await invoke("get_config");
+  emoji = await fetch("emoji.json").then((r) => r.json()).catch(() => ({}));
   messages = await invoke("get_messages");
   for (const s of await invoke("get_statuses")) statuses[s.id] = s;
   $("#autostart").checked = await invoke("get_autostart").catch(() => false);

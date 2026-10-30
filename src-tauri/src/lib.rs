@@ -1,28 +1,31 @@
 mod config;
+mod history;
 #[cfg(target_os = "macos")]
 mod macos_notify;
 mod ntfy;
 
-use config::Config;
-use std::collections::{HashMap, VecDeque};
+use config::{Config, Server, Subscription};
+use history::History;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::async_runtime::JoinHandle;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, RunEvent, State, WindowEvent};
+use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
-pub const MAX_MESSAGES: usize = 200;
 /// Passed by the login item so the app starts minimised to the tray.
 const HIDDEN_ARG: &str = "--hidden";
 
+type Task = ((Server, Subscription), JoinHandle<()>);
+
 pub struct AppState {
     config: Mutex<Config>,
-    /// subscription id -> (fingerprint of server+subscription, running task)
-    tasks: Mutex<HashMap<String, (String, JoinHandle<()>)>>,
-    messages: Mutex<VecDeque<ntfy::Message>>,
+    /// subscription id -> (server and subscription it was started with, running task)
+    tasks: Mutex<HashMap<String, Task>>,
+    history: Mutex<History>,
     statuses: Mutex<HashMap<String, ntfy::Status>>,
 }
 
@@ -33,16 +36,19 @@ fn sync_subscriptions(app: &AppHandle) {
     let cfg = state.config.lock().unwrap().clone();
     let mut tasks = state.tasks.lock().unwrap();
 
-    let mut wanted = HashMap::new();
-    for sub in cfg.subscriptions.iter().filter(|s| s.enabled) {
-        if let Some(server) = cfg.servers.iter().find(|s| s.id == sub.server_id) {
-            let fingerprint = format!("{server:?}{sub:?}");
-            wanted.insert(sub.id.clone(), (fingerprint, server.clone(), sub.clone()));
-        }
-    }
+    let wanted: HashMap<String, (Server, Subscription)> = cfg
+        .subscriptions
+        .iter()
+        .filter(|sub| sub.enabled)
+        .filter_map(|sub| {
+            let server = cfg.servers.iter().find(|s| s.id == sub.server_id)?;
+            Some((sub.id.clone(), (server.clone(), sub.clone())))
+        })
+        .collect();
 
-    tasks.retain(|id, (fp, handle)| {
-        let keep = wanted.get(id).is_some_and(|(want_fp, _, _)| want_fp == fp);
+    // Stop tasks that were removed, disabled or whose server/subscription settings changed.
+    tasks.retain(|id, (running, handle)| {
+        let keep = wanted.get(id) == Some(running);
         if !keep {
             handle.abort();
             state.statuses.lock().unwrap().remove(id);
@@ -50,10 +56,11 @@ fn sync_subscriptions(app: &AppHandle) {
         keep
     });
 
-    for (id, (fp, server, sub)) in wanted {
-        if !tasks.contains_key(&id) {
-            let handle = tauri::async_runtime::spawn(ntfy::run(app.clone(), server, sub));
-            tasks.insert(id, (fp, handle));
+    for (id, (server, sub)) in wanted {
+        if let std::collections::hash_map::Entry::Vacant(slot) = tasks.entry(id) {
+            let since = state.history.lock().unwrap().last_id(&sub.id);
+            let task = ntfy::run(app.clone(), server.clone(), sub.clone(), since);
+            slot.insert(((server, sub), tauri::async_runtime::spawn(task)));
         }
     }
 }
@@ -73,14 +80,12 @@ fn save_config(app: AppHandle, state: State<AppState>, config: Config) -> Result
 
 #[tauri::command]
 fn get_messages(state: State<AppState>) -> Vec<ntfy::Message> {
-    state.messages.lock().unwrap().iter().cloned().collect()
+    state.history.lock().unwrap().all()
 }
 
 #[tauri::command]
-fn clear_messages(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    let mut messages = state.messages.lock().unwrap();
-    messages.clear();
-    config::save_messages(&app, &messages)
+fn clear_messages(state: State<AppState>) -> Result<(), String> {
+    state.history.lock().unwrap().clear()
 }
 
 #[tauri::command]
@@ -113,13 +118,14 @@ fn on_notification_click(app: &AppHandle, url: Option<String>) {
 
 #[tauri::command]
 fn test_notification(app: AppHandle) {
-    let id = format!("test-{}", std::process::id());
+    let id = format!("test-{:?}", std::time::SystemTime::now());
     notify(&app, &id, "ntfyui", "Notifications are working 🎉", None);
 }
 
 /// "authorized", "denied", "not_determined" or "unknown".
+/// Async so the wait for macOS's answer doesn't block the main thread.
 #[tauri::command]
-fn notification_permission() -> &'static str {
+async fn notification_permission() -> &'static str {
     #[cfg(target_os = "macos")]
     return macos_notify::permission();
     #[cfg(not(target_os = "macos"))]
@@ -142,7 +148,11 @@ struct Outgoing {
 }
 
 #[tauri::command]
-async fn publish(state: State<'_, AppState>, server_id: String, message: Outgoing) -> Result<(), String> {
+async fn publish(
+    state: State<'_, AppState>,
+    server_id: String,
+    message: Outgoing,
+) -> Result<(), String> {
     let server = state
         .config
         .lock()
@@ -175,7 +185,9 @@ fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("only http(s) links can be opened".into());
     }
-    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -196,7 +208,12 @@ fn get_autostart(app: AppHandle) -> Result<bool, String> {
 #[tauri::command]
 fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
     let launcher = app.autolaunch();
-    if enabled { launcher.enable() } else { launcher.disable() }.map_err(|e| e.to_string())
+    if enabled {
+        launcher.enable()
+    } else {
+        launcher.disable()
+    }
+    .map_err(|e| e.to_string())
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -220,7 +237,7 @@ pub fn run() {
             app.manage(AppState {
                 config: Mutex::new(config::load(&handle)),
                 tasks: Mutex::new(HashMap::new()),
-                messages: Mutex::new(config::load_messages(&handle)),
+                history: Mutex::new(History::load(&handle)),
                 statuses: Mutex::new(HashMap::new()),
             });
 
@@ -282,11 +299,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building ntfyui");
 
-    app.run(|app, event| {
+    app.run(|_app, _event| {
+        // Clicking the Dock icon reopens the hidden window.
         #[cfg(target_os = "macos")]
-        if let RunEvent::Reopen { .. } = event {
-            show_main_window(app);
+        if let tauri::RunEvent::Reopen { .. } = _event {
+            show_main_window(_app);
         }
-        let _ = (app, event);
     });
 }
